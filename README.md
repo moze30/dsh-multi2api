@@ -22,11 +22,18 @@
 
 ## 安装
 
+这是一个 DSH 插件，用 DSH 自带的插件命令装：
+
 ```bash
-npm install dsh-multi2api
+dsh plugin --profile web install dsh-multi2api
 ```
 
-装完后在 DSH 的插件管理里启用（或让 `dsh plugin install` 直接装）。
+把 `web` 换成你要装的 profile 名字（比如 `tui`、`headless`）。装完重启 DSH 就能用。
+
+也可以直接在 DSH 网页端左侧栏的 **插件（Plugins）** 页面里，点「添加插件」填包名 `dsh-multi2api` 安装。
+
+> `npm install dsh-multi2api` 也能下载到这个包，但它只是把包装进普通 `node_modules`，
+> 不会挂进你的 profile，还得自己改 `dsh.profile.bundles`，所以推荐用上面的命令。
 
 ## 使用
 
