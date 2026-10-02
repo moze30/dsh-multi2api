@@ -1,0 +1,62 @@
+{
+  "name": "dsh-multi2api",
+  "version": "0.1.4",
+  "description": "Multi2API 账号池：把多个 WorkBuddy 账号变成 DSH 里一个个互不干扰的模型。",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "bin",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale",
+    "go-patch",
+    "README.md",
+    "LICENSE"
+  ],
+  "icon": "./icon.svg",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "slots",
+        "locale"
+      ]
+    }
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "multi2api",
+    "workbuddy",
+    "codebuddy"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moze30/dsh-multi2api.git"
+  },
+  "homepage": "https://github.com/moze30/dsh-multi2api#readme",
+  "bugs": {
+    "url": "https://github.com/moze30/dsh-multi2api/issues"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-home-paths": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-llm": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-llm-pi-ai": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/schemastery": "^3.18.2",
+    "@earendil-works/pi-ai": "^0.87.1"
+  }
+}

@@ -1,0 +1,417 @@
+--- a/cmd/server/config.go
++++ b/cmd/server/config.go
+@@ -67,6 +67,9 @@
+ type WorkBuddyScheduleConfig struct {
+ 	CheckinHours   []int `json:"checkin_hours"`   // [9,21]
+ 	KeepaliveHours []int `json:"keepalive_hours"` // [22]
++	// AutoCheckin 是否自动签到：控制「整点定时签到」与「进程启动补签」两处。
++	// nil = 视为 true（保持旧行为）。用指针才能区分「未配置」与「显式关闭」。
++	AutoCheckin *bool `json:"auto_checkin"`
+ }
+ 
+ // WorkBuddyProviderConfig WorkBuddy provider 分节。
+@@ -139,6 +142,7 @@
+ 	c.Providers.WorkBuddy.Cooldown.ErrCooldown = "10m"
+ 	c.Providers.WorkBuddy.Schedule.CheckinHours = []int{9, 21}
+ 	c.Providers.WorkBuddy.Schedule.KeepaliveHours = []int{22}
++	c.Providers.WorkBuddy.Schedule.AutoCheckin = boolPtr(true)
+ 	c.Providers.WorkBuddy.Upstream.TimeoutSeconds = 120
+ 
+ 	c.Providers.QClaw.AuthDir = ""
+@@ -332,6 +336,9 @@
+ 	if len(w.Schedule.KeepaliveHours) == 0 {
+ 		w.Schedule.KeepaliveHours = []int{22}
+ 	}
++	if w.Schedule.AutoCheckin == nil {
++		w.Schedule.AutoCheckin = boolPtr(true)
++	}
+ 	if w.Upstream.TimeoutSeconds <= 0 {
+ 		w.Upstream.TimeoutSeconds = 120
+ 	}
+@@ -399,6 +406,8 @@
+ 	return ""
+ }
+ 
++func boolPtr(v bool) *bool { return &v }
++
+ func parseCSInts(s string) ([]int, error) {
+ 	parts := strings.Split(s, ",")
+ 	out := make([]int, 0, len(parts))
+--- a/cmd/server/main.go
++++ b/cmd/server/main.go
+@@ -69,6 +69,7 @@
+ 		WorkBuddy: scheduler.WorkBuddySchedule{
+ 			CheckinHours:   cfg.Providers.WorkBuddy.Schedule.CheckinHours,
+ 			KeepaliveHours: cfg.Providers.WorkBuddy.Schedule.KeepaliveHours,
++			AutoCheckin:    cfg.Providers.WorkBuddy.Schedule.AutoCheckin,
+ 		},
+ 		QClaw: scheduler.QClawSchedule{
+ 			KeepaliveHours: cfg.Providers.QClaw.Schedule.KeepaliveHours,
+@@ -110,10 +111,13 @@
+ 	defer stop()
+ 	go sch.Run(ctx)
+ 	// 调度器只认整点（9/21），容器重启易错过 9 点场；启动后补一次签到（幂等，已签视为成功）。
+-	go func() {
+-		time.Sleep(3 * time.Second)
+-		sch.RunCheckinNowFor(provider.PlatformWorkBuddy)
+-	}()
++	// 由 providers.workbuddy.schedule.auto_checkin 控制；显式 false 时不补签。
++	if cfg.Providers.WorkBuddy.Schedule.AutoCheckin == nil || *cfg.Providers.WorkBuddy.Schedule.AutoCheckin {
++		go func() {
++			time.Sleep(3 * time.Second)
++			sch.RunCheckinNowFor(provider.PlatformWorkBuddy)
++		}()
++	}
+ 
+ 	srv := &http.Server{
+ 		Addr:              cfg.Listen,
+--- a/internal/provider/provider.go
++++ b/internal/provider/provider.go
+@@ -87,6 +87,12 @@
+ 	Name          string
+ 	ContextWindow int64 // = maxInputTokens
+ 	MaxTokens     int64 // = maxOutputTokens
++	// Credits 上游给出的积分倍率原文，形如 "x0.11 credits" / "x0.05"；可能为空。
++	Credits string
++	// 能力位，用于下游决定是否开启图片/思考/工具。
++	SupportsImages    bool
++	SupportsReasoning bool
++	SupportsToolCall  bool
+ }
+ 
+ // Provider 平台上游能力抽象。ChatStream 接收的是已由 PrepareBody 改写过的请求体。
+--- a/internal/provider/workbuddy/provider.go
++++ b/internal/provider/workbuddy/provider.go
+@@ -309,11 +309,15 @@
+ 		Code int `json:"code"`
+ 		Data struct {
+ 			Models []struct {
+-				ID              string `json:"id"`
+-				Name            string `json:"name"`
+-				MaxInputTokens  int64  `json:"maxInputTokens"`
+-				MaxOutputTokens int64  `json:"maxOutputTokens"`
+-				Disabled        bool   `json:"disabled"`
++				ID                string `json:"id"`
++				Name              string `json:"name"`
++				MaxInputTokens    int64  `json:"maxInputTokens"`
++				MaxOutputTokens   int64  `json:"maxOutputTokens"`
++				Disabled          bool   `json:"disabled"`
++				Credits           string `json:"credits"`
++				SupportsImages    bool   `json:"supportsImages"`
++				SupportsReasoning bool   `json:"supportsReasoning"`
++				SupportsToolCall  bool   `json:"supportsToolCall"`
+ 			} `json:"models"`
+ 			Agents []struct {
+ 				Name   string   `json:"name"`
+@@ -343,10 +347,14 @@
+ 			continue
+ 		}
+ 		dynMap[m.ID] = provider.ModelInfo{
+-			ID:            m.ID,
+-			Name:          m.Name,
+-			ContextWindow: m.MaxInputTokens,
+-			MaxTokens:     m.MaxOutputTokens,
++			ID:                m.ID,
++			Name:              m.Name,
++			ContextWindow:     m.MaxInputTokens,
++			MaxTokens:         m.MaxOutputTokens,
++			Credits:           m.Credits,
++			SupportsImages:    m.SupportsImages,
++			SupportsReasoning: m.SupportsReasoning,
++			SupportsToolCall:  m.SupportsToolCall,
+ 		}
+ 	}
+ 	out := make([]provider.ModelInfo, 0, len(cliIDs))
+--- a/internal/scheduler/scheduler.go
++++ b/internal/scheduler/scheduler.go
+@@ -22,6 +22,8 @@
+ type WorkBuddySchedule struct {
+ 	CheckinHours   []int
+ 	KeepaliveHours []int
++	// AutoCheckin 是否注册整点自动签到任务；nil = 视为 true（保持旧行为）。
++	AutoCheckin *bool
+ }
+ 
+ // QClawSchedule qclaw 定时配置（每日 keepalive 探活）。
+@@ -71,14 +73,17 @@
+ 		cfg.QClaw.KeepaliveHours = []int{0}
+ 	}
+ 	s := &Scheduler{cfg: cfg}
++	autoCheckin := cfg.WorkBuddy.AutoCheckin == nil || *cfg.WorkBuddy.AutoCheckin
+ 	s.tasks = []task{
+ 		{name: "trae-refresh", hours: append([]int{}, cfg.Trae.RefreshHours...), run: func() { s.RunRefreshNowFor(provider.PlatformTrae) }},
+ 		{name: "trae-checkin", hours: []int{cfg.Trae.CheckinHour}, run: func() { s.RunCheckinNowFor(provider.PlatformTrae) }},
+-		{name: "workbuddy-checkin", hours: append([]int{}, cfg.WorkBuddy.CheckinHours...), run: func() { s.RunCheckinNowFor(provider.PlatformWorkBuddy) }},
+ 		{name: "workbuddy-keepalive", hours: append([]int{}, cfg.WorkBuddy.KeepaliveHours...), run: func() { s.RunRefreshNowFor(provider.PlatformWorkBuddy) }},
+ 		// QC2A 无签到接口：每日 keepalive 探活冷却账号并刷新积分。
+ 		{name: "qclaw-keepalive", hours: append([]int{}, cfg.QClaw.KeepaliveHours...), run: func() { s.RunQClawKeepaliveNow() }},
+ 	}
++	if autoCheckin {
++		s.tasks = append(s.tasks, task{name: "workbuddy-checkin", hours: append([]int{}, cfg.WorkBuddy.CheckinHours...), run: func() { s.RunCheckinNowFor(provider.PlatformWorkBuddy) }})
++	}
+ 	return s
+ }
+ 
+--- a/internal/server/handler.go
++++ b/internal/server/handler.go
+@@ -10,6 +10,7 @@
+ 	"log"
+ 	"net/http"
+ 	"strings"
++	"sync"
+ 	"time"
+ 
+ 	"multi2api/internal/auth"
+@@ -54,8 +55,17 @@
+ type Handler struct {
+ 	cfg Config
+ 	mux *http.ServeMux
++
++	// 动态上游模型表缓存（WorkBuddy /models 接口）。
++	modelsMu   sync.RWMutex
++	modelsList []provider.ModelInfo
++	modelsAt   time.Time
++	modelsErr  error
+ }
+ 
++// modelsCacheTTL 上游模型表缓存时长。
++const modelsCacheTTL = 10 * time.Minute
++
+ // NewHandler 构建 handler。
+ func NewHandler(cfg Config) *Handler {
+ 	if cfg.MaxRotate <= 0 {
+@@ -146,34 +156,133 @@
+ 	})
+ }
+ 
+-// supportedModels 对外支持的模型 → 上游映射。
++// supportedModels 静态兜底模型表 → 上游映射。
++// 正常情况下以动态上游模型表（/v1/models 实时拉取）为准，仅在拉取失败时兜底。
+ var supportedModels = map[string]string{
+ 	"deepseek-v4.1-flash": "deepseek-v4.1-flash",
+ 	"deepseek-v4-pro":     "deepseek-v4-pro",
+ 	"glm-5.3":             "glm-5.3",
+ }
+ 
+-// mapModel 校验模型名并返回上游模型名。空/auto 默认 deepseek-v4.1-flash。
+-// 支持带账号后缀的别名，如 deepseek-v4.1-flash-13800138000：
+-// 后缀为账号昵称（手机号），用于精确挑号；返回的上游模型名已去掉后缀。
++// catalogPlatformOrder 探测上游模型表时的平台优先级。
++var catalogPlatformOrder = []string{
++	provider.PlatformWorkBuddy,
++	provider.PlatformTrae,
++	provider.PlatformQClaw,
++}
++
++// catalog 返回上游动态模型表（带缓存）。force=true 时强制刷新。
++func (h *Handler) catalog(force bool) ([]provider.ModelInfo, error) {
++	h.modelsMu.RLock()
++	if !force && len(h.modelsList) > 0 && time.Since(h.modelsAt) < modelsCacheTTL {
++		list := h.modelsList
++		h.modelsMu.RUnlock()
++		return list, nil
++	}
++	h.modelsMu.RUnlock()
++
++	h.modelsMu.Lock()
++	defer h.modelsMu.Unlock()
++	// 双检：可能已被并发请求刷新。
++	if !force && len(h.modelsList) > 0 && time.Since(h.modelsAt) < modelsCacheTTL {
++		return h.modelsList, nil
++	}
++
++	// 按平台分组，每个平台取一个账号，合并其模型表（按 ID 去重，先到先得）。
++	seen := map[string]bool{}
++	merged := make([]provider.ModelInfo, 0, 32)
++	var firstErr error
++	for _, platform := range catalogPlatformOrder {
++		p := h.cfg.Providers[platform]
++		if p == nil {
++			continue
++		}
++		var acct *auth.Auth
++		for _, st := range h.cfg.Pool.List() {
++			if st.Platform != platform {
++				continue
++			}
++			if a := h.cfg.Pool.AuthByKey(st.Key); a != nil {
++				acct = a
++				break
++			}
++		}
++		if acct == nil {
++			continue
++		}
++		infos, err := p.FetchModels(acct)
++		if err != nil {
++			if firstErr == nil {
++				firstErr = fmt.Errorf("%s: %w", platform, err)
++			}
++			continue
++		}
++		for _, info := range infos {
++			if info.ID == "" || seen[info.ID] {
++				continue
++			}
++			seen[info.ID] = true
++			merged = append(merged, info)
++		}
++	}
++	if len(merged) == 0 {
++		h.modelsErr = firstErr
++		return nil, firstErr
++	}
++	h.modelsList = merged
++	h.modelsAt = time.Now()
++	h.modelsErr = nil
++	return merged, nil
++}
++
++// modelUpstream 在动态表中查模型 ID（大小写不敏感），返回上游模型名。
++func (h *Handler) modelUpstream(list []provider.ModelInfo, model string) (string, bool) {
++	for _, info := range list {
++		if strings.EqualFold(info.ID, model) {
++			return info.ID, true
++		}
++	}
++	return "", false
++}
++
++// mapModel 校验模型名并返回上游模型名。空/auto 默认第一个可用模型。
++// 支持带账号后缀的别名，如 glm-5.3-13800138000：后缀为账号昵称（手机号）用于精确挑号，
++// 返回的上游模型名已去掉后缀。
+ func (h *Handler) mapModel(model string) (string, error) {
+-	model = strings.TrimSpace(strings.ToLower(model))
+-	if model == "" || model == "auto" {
+-		model = provider.UnifiedModel
++	raw := strings.TrimSpace(model)
++	lower := strings.ToLower(raw)
++
++	list, _ := h.catalog(false)
++
++	if lower == "" || lower == "auto" || lower == provider.UnifiedModel {
++		// 优先用动态表里的 deepseek-v4.1-flash，其次是列表第一个。
++		if upstream, ok := h.modelUpstream(list, provider.UnifiedModel); ok {
++			return upstream, nil
++		}
++		if len(list) > 0 {
++			return list[0].ID, nil
++		}
++		return provider.UnifiedModel, nil
+ 	}
+-	if upstream, ok := supportedModels[model]; ok {
++	if upstream, ok := h.modelUpstream(list, lower); ok {
+ 		return upstream, nil
+ 	}
+-	if base, nick, ok := splitModelNick(model); ok {
++	// 剥掉账号后缀再查一次。
++	if base, _, ok := splitModelNick(lower); ok {
++		if upstream, ok := h.modelUpstream(list, base); ok {
++			return upstream, nil
++		}
+ 		if upstream, ok := supportedModels[base]; ok {
+-			_ = nick
+ 			return upstream, nil
+ 		}
+ 	}
+-	return "", fmt.Errorf("unsupported model %q, supported: deepseek-v4.1-flash, deepseek-v4-pro, glm-5.3", model)
++	if upstream, ok := supportedModels[lower]; ok {
++		return upstream, nil
++	}
++	return "", fmt.Errorf("unsupported model %q", raw)
+ }
+ 
+-// splitModelNick 把 "deepseek-v4.1-flash-13800138000" 拆成 ("deepseek-v4.1-flash", "13800138000", true)。
++// splitModelNick 把 "deepseek-v4.1-flash-13800138000" 拆成 ("deepseek-v4.1-flash", "13800138000", true)。
+ // 最后一段必须全为数字（账号昵称/手机号）才认定为后缀。
+ func splitModelNick(model string) (string, string, bool) {
+ 	i := strings.LastIndex(model, "-")
+@@ -189,24 +298,72 @@
+ 	return model[:i], nick, true
+ }
+ 
+-// models 返回支持的模型列表。
++// models 返回上游可用模型列表（动态拉取，失败时回退静态表）。
++// 支持 ?refresh=1 强制刷新。
+ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
+-	data := make([]map[string]any, 0, len(supportedModels))
+-	for id, upstream := range supportedModels {
+-		data = append(data, map[string]any{
+-			"id":             id,
++	force := r.URL.Query().Get("refresh") == "1"
++	list, err := h.catalog(force)
++
++	if len(list) == 0 {
++		// 回退静态表，保证下游至少能启动。
++		data := make([]map[string]any, 0, len(supportedModels))
++		for id, upstream := range supportedModels {
++			data = append(data, map[string]any{
++				"id":             id,
++				"object":         "model",
++				"created":        1753600000,
++				"owned_by":       "multi2api",
++				"upstream_model": upstream,
++			})
++		}
++		writeJSON(w, http.StatusOK, map[string]any{
++			"object": "list",
++			"data":   data,
++		})
++		return
++	}
++
++	data := make([]map[string]any, 0, len(list))
++	for _, info := range list {
++		item := map[string]any{
++			"id":             info.ID,
+ 			"object":         "model",
+ 			"created":        1753600000,
+ 			"owned_by":       "multi2api",
+-			"upstream_model": upstream,
+-		})
++			"upstream_model": info.ID,
++		}
++		if info.Name != "" {
++			item["name"] = info.Name
++		}
++		if info.ContextWindow > 0 {
++			item["context_window"] = info.ContextWindow
++		}
++		if info.MaxTokens > 0 {
++			item["max_tokens"] = info.MaxTokens
++		}
++		if info.Credits != "" {
++			item["credits"] = info.Credits
++		}
++		item["supports_reasoning"] = info.SupportsReasoning
++		item["supports_images"] = info.SupportsImages
++		item["supports_tool_call"] = info.SupportsToolCall
++		data = append(data, item)
+ 	}
+ 	writeJSON(w, http.StatusOK, map[string]any{
+ 		"object": "list",
+ 		"data":   data,
++		"error":  errString(err),
+ 	})
+ }
+ 
++// errString 把可选错误转成字符串（成功返回空串）。
++func errString(err error) string {
++	if err == nil {
++		return ""
++	}
++	return err.Error()
++}
++
+ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
+ 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
+ 	if err != nil {
+@@ -229,7 +386,7 @@
+ 		return
+ 	}
+ 
+-	// 模型名后缀指定账号（如 deepseek-v4.1-flash-13800138000）优先；
++	// 模型名后缀指定账号（如 deepseek-v4.1-flash-13800138000）优先；
+ 	// 其次支持 X-Account-Uid 头指定账号。
+ 	_, reqNick, _ := splitModelNick(strings.TrimSpace(strings.ToLower(peek.Model)))
+ 	reqUID := r.Header.Get("X-Account-Uid")
