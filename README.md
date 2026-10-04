@@ -68,6 +68,30 @@ dsh plugin --profile web install dsh-multi2api
 
 ## 更新日志
 
+### 0.1.8
+
+修「**发图就报 `pi-ai image input requires the durable attachment service`**」，外加一处一直没生效的设置。
+
+- **图片发不出去**：`dsh-llm-pi-ai` 在处理含图请求前会问适配器要 DSH 的
+  durable attachment 服务，拿不到就直接抛错、请求根本不发出去。本插件构造
+  `PiAiAdapter` 时漏了这两个字段，所以**任何带图的请求都必然失败**。现在按
+  DSH 自己那个 pi-ai provider 的写法补上 `resolveAttachments` 与 `resolveImageAccess`
+  （`resolveImageAttachmentAccess` 本就是 `@deepseek-ai/dsh-llm` 的公开导出）。
+- **输出上限可能一直没生效**：pi-ai 决定「最大输出」字段用哪个拼写时，未显式声明就退回
+  `detectCompat()`，而它**只看 provider 名和 baseUrl**。本插件的路由是
+  `provider=multi2api` + `http://127.0.0.1:<端口>/v1` 的本地代理，一个特征都匹配不上，
+  于是回落到 OpenAI 新拼写 `max_completion_tokens` —— 对 DeepSeek 系上游是错的，
+  模型上声明的 `maxTokens`（上游默认 128000）会被上游忽略（不报错，只是不生效）。
+  现在钉死为 `max_tokens`。已知同类问题作者此前已手动改对 4 个
+  （`thinkingFormat` / `supportsDeveloperRole` / `supportsStore` /
+  `requiresReasoningContentOnAssistantMessages`），这是第 5 个。
+- **回放降级不再静默**：补上 `onReplayDegrade`，历史里的图片被降级成占位符时会记一条
+  warning（DSH 自己的 provider 也这么做）。只增加可观测性，不改变行为。
+
+**没动的**：`supports_tool_call`（上游会报，但 pi-ai 里**没有**对应的模型字段，
+插件无处声明）；`credits → cost`（上游给的是倍率如 `x0.29`，而 `cost` 是"每 token 多少美元"，
+量纲不同，硬映射只会显示假数字）。
+
 ### 0.1.7
 
 修「**刚配好的账号，在聊天界面的模型选择器里看不见**」：
