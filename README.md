@@ -30,6 +30,8 @@ dsh plugin --profile web install dsh-multi2api
 
 把 `web` 换成你要装的 profile 名字（比如 `tui`、`headless`）。装完重启 DSH 就能用。
 
+支持 DSH `0.2.0-rc.1` 到 `0.2.x`（含 `0.2.0-rc.2` 与 `0.2.1-rc.1`）。0.2 之前的旧版 DSH 没有验证过，会被兼容性检查拦下。
+
 也可以直接在 DSH 网页端左侧栏的 **插件（Plugins）** 页面里，点「添加插件」填包名 `dsh-multi2api` 安装。
 
 > `npm install dsh-multi2api` 也能下载到这个包，但它只是把包装进普通 `node_modules`，
@@ -67,6 +69,24 @@ dsh plugin --profile web install dsh-multi2api
   或者在面板里用「导入账号文件」导入即可。
 
 ## 更新日志
+
+### 0.1.9
+
+修「**装到 DSH 0.2.1 上被兼容性检查拦下**」：`dsh-multi2api@0.1.8 与 DSH 0.2.1-rc.1 不兼容`。
+
+- **原因**：`peerDependencies` 写的是 `>=0.1.2-rc.1 <0.2.0`，只放到 0.2.0 之前。
+  DSH 0.2.0 之后内部包整体进了 `0.2.x`，这个上限就把新版本全挡在外面了。
+- **改动**：三个 `@deepseek-ai/dsh-*` peer 的上限提到 `<0.3.0-0`，下限定在 `0.2.0-rc.1`
+  （0.2 之前的老 DSH 没有验证过，不再声称支持）。同时把 pi-ai 的 peer 从 `^0.87.1`
+  放宽成 `^0.87.1 || >=1.1.0 <2.0.0` —— DSH 0.2.1 把 pi-ai 从 0.87 跳到了 1.x。
+- **预发布注意**：`>=0.2.0-rc.1 <0.3.0-0` 这种写法在 npm 的严格 semver 下匹配不到
+  `0.2.1-rc.1` 这类预发布，所以区间按已知的预发布线分别列出，保证 npm / pnpm / DSH
+  三处判定都通过。
+- **已实测**：0.2.0-rc.2（pi-ai 0.87.1）与 0.2.1-rc.1（pi-ai 1.3.0）两套依赖树里，
+  `npm install` 均无 ERESOLVE、插件模块均能正常加载并导出 `Config/apply/inject/name`。
+  插件用到的宿主接口（`PiAiAdapter` 及其全部构造选项、`resolveRetryPolicy`、
+  `resolveImageAttachmentAccess`、`resolveDshHome`、`createProvider`、
+  `openAICompletionsApi`）在 0.2.1 中签名未变。
 
 ### 0.1.8
 
