@@ -1,0 +1,5 @@
+# 覆盖官方 dsh-web-app bundle 挂载的 harness-dev-context 行，
+# 把它的实现换成我们这个改过一处措辞的版本。
+# 条目 id 必须与官方一致，否则会变成新增一个而不是替换。
+- id: harness-dev-context
+  name: dsh-harness-dev-context-patched

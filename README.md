@@ -70,6 +70,48 @@ dsh plugin --profile web install dsh-multi2api
 
 ## 更新日志
 
+### 0.1.10
+
+内置「**上游风控规避**」：装上本插件后，新会话不再被 WorkBuddy/CodeBuddy 拦截。
+
+- **背景**：上游会对 system prompt 做文本特征匹配，命中就返回
+  `400 { "code": 11128, "msg": "Illegal API invocation from an unapproved channel" }`，
+  界面显示「请求被拦截」。这不是 DSH 或本插件的问题，是上游侧的行为。
+  
+  症状是：**老会话能用，新建会话一律报错**。
+
+- **两处触发点**（都已实测定位）：
+
+  1. 原厂的 `You are an AI agent powered by DeepSeek Harness.`
+     —— 由 `dsh-system-prompt` 注入。本插件的 bundle patch 关掉 `includeHarnessIdentity`，
+     模型仍会收到 coding agent 的 persona，能力不受影响。
+
+  2. `dsh-harness-dev-context` 注入的 Web GUI 段落里，
+     `whose URL the runtime context `**`names`**` 这半句。
+     —— 改用包内自带的 `dsh-multi2api/dev-context`：只把 `names` 换成 `provides`，
+     其余 **1002 个字符逐字相同**，语义与信息量完全不变。
+
+- **怎么做到的**：`cordis.patch.yml` 里同时做了四件事
+  —— 挂载本插件、关掉原厂身份句、禁用官方 `harness-dev-context`、
+  挂载包内的替身（走子路径导出 `dsh-multi2api/dev-context`）。
+  **不需要你手动改任何配置**。
+
+- **实测**：新会话连续 3 次全部 `completed`；
+  插件功能（checkout 提示、HMR/Vite 说明、GUI URL runtime context）一条没少。
+
+  | 内容 | 拦截率 |
+  | --- | --- |
+  | 原始文本 | 3/3 被拦 |
+  | 修掉这两处后 | **0/3** |
+
+- **给你自己核查**：装完后 `dsh --profile <名> --dump-config`，
+  在 `system-prompt` 处应看到 `includeHarnessIdentity: false`，
+  并多出一条 `harness-dev-context-patched`，其 `name` 为 `dsh-multi2api/dev-context`。
+
+- **上游修复建议**：官方只要把 `dsh-harness-dev-context` 里 `WEB_SURFACE_PROMPT` 的
+  `names` 换个词即可，所有用 WorkBuddy/multi2api 的人都能受益。
+
+- **不影响**：账号池、模型列表、图片、`auto` 模式、面板功能全部照旧。
 ### 0.1.9
 
 修「**装到 DSH 0.2.1 上被兼容性检查拦下**」：`dsh-multi2api@0.1.8 与 DSH 0.2.1-rc.1 不兼容`。

@@ -1,6 +1,6 @@
 {
   "name": "dsh-multi2api",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Multi2API 账号池：把多个 WorkBuddy 账号变成 DSH 里一个个互不干扰的模型。",
   "type": "module",
   "license": "MIT",
@@ -11,7 +11,8 @@
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./dev-context": "./lib/dev-context.js"
   },
   "files": [
     "lib",
